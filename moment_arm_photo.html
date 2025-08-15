@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>写真からモーメントアーム推定（オフライン）</title>
+<style>
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,'Noto Sans JP','Hiragino Kaku Gothic ProN',Meiryo,sans-serif;background:#f7f7fb;color:#111}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 12px}
+  .card{background:#fff;border:1px solid #e6e6ef;border-radius:16px;box-shadow:0 6px 18px rgba(0,0,0,.05);overflow:hidden}
+  .header{padding:16px 20px;border-bottom:1px solid #e6e6ef}
+  .grid{display:grid;grid-template-columns:1.2fr .8fr}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+  .toolbar{display:flex;gap:8px;padding:10px 12px;border-bottom:1px solid #e6e6ef;flex-wrap:wrap}
+  input,select,button{font-size:14px} button{padding:8px 12px;border:1px solid #e6e6ef;border-radius:10px;background:#fff;cursor:pointer}
+  .canvasWrap{position:relative;min-height:360px;background:#fafafe} canvas{width:100%;display:block}
+  table{width:100%;border-collapse:separate;border-spacing:0 10px;padding:12px}
+  thead th{font-size:12px;color:#666;text-align:left;padding:0 6px}
+  tbody tr{background:#fff;border:1px solid #e6e6ef;border-radius:12px}
+  tbody td{padding:8px 6px}
+</style>
+</head>
+<body>
+<div class="wrap"><div class="card">
+<div class="header"><h1>写真からモーメントアーム推定（オフライン）</h1></div>
+<div class="grid">
+<div>
+  <div class="toolbar">
+    <input id="file" type="file" accept="image/*">
+    <button id="fit">全体表示</button>
+    <label>スケール法
+      <select id="mode"><option value="known">既知の長さ</option><option value="height">身長</option></select>
+    </label>
+    <span id="grpKnown"><label>既知の長さ(cm) <input id="known" type="number" step="0.1" style="width:120px"></label> <button id="calibK">2点クリック</button></span>
+    <span id="grpHeight" style="display:none"><label>身長(cm) <input id="hcm" type="number" step="0.1" style="width:120px"></label> <button id="calibH">頭頂→踵</button></span>
+  </div>
+  <div class="canvasWrap"><canvas id="cv" width="1600" height="1000"></canvas></div>
+</div>
+<div>
+  <table><thead><tr><th>項目</th><th>計測</th><th>結果(m)</th></tr></thead><tbody id="tbody"></tbody></table>
+  <div style="padding:0 12px 12px">
+    <button id="csv">CSVダウンロード</button> <button id="clear">全消去</button>
+  </div>
+</div>
+</div></div></div>
+<script>
+const ITEMS=[
+ {key:'hip_flex',name:'股関節屈曲（ASIS→荷重センサ中点）'},
+ {key:'knee_ext',name:'膝伸展（外側上顆→荷重センサ中点）'},
+ {key:'hip_abd',name:'股関節外転（大転子→荷重センサ中点）'},
+ {key:'hip_ext',name:'股関節伸展（座骨→荷重センサ中点）'},
+ {key:'ankle',name:'足関節底背屈（外果→荷重センサ中点）'}
+];
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+let img=new Image(),loaded=false,scalePxPerCm=null,view={x:0,y:0,zoom:1},calibPts=[],awaitK=false,awaitH=false,measure={},active=null;
+function build(){const tb=document.getElementById('tbody');tb.innerHTML='';ITEMS.forEach(it=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${it.name}</td><td><button class="m" data-k="${it.key}">計測</button> <button class="x" data-k="${it.key}">×</button></td><td id="o_${it.key}">—</td>`;tb.appendChild(tr);});}
+build();
+document.getElementById('mode').addEventListener('change',e=>{const v=e.target.value;document.getElementById('grpKnown').style.display=v==='known'?'inline':'none';document.getElementById('grpHeight').style.display=v==='height'?'inline':'none';});
+document.getElementById('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const u=URL.createObjectURL(f);img.onload=()=>{loaded=true;fit();draw();};img.src=u;});
+function fit(){if(!loaded)return;const m=20;const z=Math.min((cv.width-m*2)/img.width,(cv.height-m*2)/img.height);view.zoom=z;view.x=(cv.width-img.width*z)/2;view.y=(cv.height-img.height*z)/2;}
+document.getElementById('fit').addEventListener('click',()=>{fit();draw();});
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);const x=e.offsetX,y=e.offsetY;if(awaitK||awaitH){handleCalib(x,y);return;}if(active){handleMeasure(x,y);return;}});
+function toImg(x,y){return[(x-view.x)/view.zoom,(y-view.y)/view.zoom]}
+function toCv(ix,iy){return[ix*view.zoom+view.x,iy*view.zoom+view.y]}
+document.getElementById('calibK').addEventListener('click',()=>{if(!loaded)return alert('先に画像');const v=Number(document.getElementById('known').value);if(!(v>0))return alert('既知長(cm)');awaitK=true;calibPts=[];alert('既知長の両端を順にクリック');});
+document.getElementById('calibH').addEventListener('click',()=>{if(!loaded)return alert('先に画像');const v=Number(document.getElementById('hcm').value);if(!(v>0))return alert('身長(cm)');awaitH=true;calibPts=[];alert('頭頂と踵を順にクリック');});
+function handleCalib(x,y){calibPts.push(toImg(x,y));draw();if(calibPts.length===2){const [a,b]=calibPts;const dx=a[0]-b[0],dy=a[1]-b[1];const dist=Math.hypot(dx,dy);if(dist<5){awaitK=awaitH=false;return alert('短すぎます');}if(awaitK){const cm=Number(document.getElementById('known').value);scalePxPerCm=dist/cm;}else if(awaitH){const cm=Number(document.getElementById('hcm').value);scalePxPerCm=dist/cm;}awaitK=awaitH=false;draw();}}
+document.getElementById('tbody').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;const k=b.dataset.k;if(b.classList.contains('m')){active=k;measure[k]={p1:null,p2:null,px:null,m:null};alert('2点をクリック');}else if(b.classList.contains('x')){measure[k]={p1:null,p2:null,px:null,m:null};document.getElementById('o_'+k).textContent='—';draw();}});
+function handleMeasure(x,y){const s=measure[active]||{p1:null,p2:null};const p=toImg(x,y);if(!s.p1)s.p1=p;else if(!s.p2)s.p2=p;if(s.p1&&s.p2){const dx=s.p1[0]-s.p2[0],dy=s.p1[1]-s.p2[1];const d=Math.hypot(dx,dy);s.px=d;s.m=(scalePxPerCm&&scalePxPerCm>0)?(d/scalePxPerCm)/100:null;measure[active]=s;document.getElementById('o_'+active).textContent=(s.m!=null)?s.m.toFixed(4):'（スケール未設定）';active=null;}else{measure[active]=s;}draw();}
+document.getElementById('csv').addEventListener('click',()=>{const rows=[['項目','距離(m)','距離(px)','備考']];ITEMS.forEach(it=>{const s=measure[it.key]||{};rows.push([it.name,s.m!=null?s.m:'',s.px!=null?s.px.toFixed(2):'','']);});const csv=rows.map(r=>r.map(f=>`"${String(f).replaceAll('"','""')}"`).join(',')).join('\r\n');const blob=new Blob(["\uFEFF"+csv],{type:'text/csv;charset=utf-8;'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='moment_arm_photo.csv';document.body.appendChild(a);a.click();a.remove();});
+document.getElementById('clear').addEventListener('click',()=>{scalePxPerCm=null;measure={};calibPts=[];draw();});
+function draw(){ctx.clearRect(0,0,cv.width,cv.height);if(loaded){ctx.save();ctx.translate(view.x,view.y);ctx.scale(view.zoom,view.zoom);ctx.drawImage(img,0,0);ctx.restore();}
+ if(calibPts.length){ctx.save();ctx.strokeStyle='#16a34a';ctx.fillStyle='#16a34a';ctx.lineWidth=2;const P=calibPts.map(p=>toCv(p[0],p[1]));dot(P[0][0],P[0][1],'#16a34a');if(P[1]){dot(P[1][0],P[1][1],'#16a34a');ctx.beginPath();ctx.moveTo(P[0][0],P[0][1]);ctx.lineTo(P[1][0],P[1][1]);ctx.stroke();}ctx.restore();}
+ Object.values(measure).forEach(s=>{if(!s||(!s.p1&&!s.p2))return;const p1=s.p1?toCv(s.p1[0],s.p1[1]):null;const p2=s.p2?toCv(s.p2[0],s.p2[1]):null;ctx.save();ctx.strokeStyle='#2563eb';ctx.fillStyle='#2563eb';ctx.lineWidth=2;if(p1)dot(p1[0],p1[1],'#2563eb');if(p2){dot(p2[0],p2[1],'#2563eb');ctx.beginPath();ctx.moveTo(p1[0],p1[1]);ctx.lineTo(p2[0],p2[1]);ctx.stroke();}ctx.restore();});}
+function dot(x,y,color){ctx.save();ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();ctx.restore();}
+draw();
+</script>
+</body></html>
